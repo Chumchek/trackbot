@@ -19,8 +19,24 @@ MONGO_URI: str = os.getenv("MONGO_URI", "")
 DB_NAME: str = os.getenv("DB_NAME", "trackapps_bot")
 APPS_COLLECTION: str = os.getenv("APPS_COLLECTION", "apps")
 CHATS_COLLECTION: str = os.getenv("CHATS_COLLECTION", "chats")
+ALLOWED_USERS_COLLECTION: str = os.getenv("ALLOWED_USERS_COLLECTION", "allowed_users")
 
 CHECK_INTERVAL: timedelta = timedelta(minutes=int(os.getenv("CHECK_INTERVAL_MINUTES", "20")))
+
+
+def _parse_allowed_user_ids() -> frozenset[int]:
+    raw = os.getenv("ALLOWED_USER_IDS", "").strip()
+    if not raw:
+        return frozenset()
+    ids = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if part.lstrip("-").isdigit():
+            ids.add(int(part))
+    return frozenset(ids)
+
+
+ALLOWED_USER_IDS: frozenset[int] = _parse_allowed_user_ids()
 CONCURRENCY_LIMIT: int = int(os.getenv("CONCURRENCY_LIMIT", "6"))
 HTTP_TIMEOUT_SECONDS: float = float(os.getenv("HTTP_TIMEOUT_SECONDS", "60"))
 # Детальні таймінги перевірок Play (логи [check] у checker/main)

@@ -9,13 +9,14 @@ from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorCollection, Asyn
 from pymongo.errors import DuplicateKeyError
 import certifi
 
-from config import MONGO_URI, DB_NAME, APPS_COLLECTION, CHATS_COLLECTION
+from config import MONGO_URI, DB_NAME, APPS_COLLECTION, CHATS_COLLECTION, ALLOWED_USERS_COLLECTION
 
 
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
 _apps: AsyncIOMotorCollection | None = None
 _chats: AsyncIOMotorCollection | None = None
+_allowed_users: AsyncIOMotorCollection | None = None
 
 
 def _utcnow() -> datetime:
@@ -106,6 +107,13 @@ def get_chats_collection() -> AsyncIOMotorCollection:
     return _chats
 
 
+def get_allowed_users_collection() -> AsyncIOMotorCollection:
+    global _allowed_users
+    if _allowed_users is None:
+        _allowed_users = get_db()[ALLOWED_USERS_COLLECTION]
+    return _allowed_users
+
+
 async def init_db() -> None:
     apps = get_apps_collection()
     # Migrate: add package to docs that don't have it
@@ -141,6 +149,9 @@ async def init_db() -> None:
     chats = get_chats_collection()
     await chats.create_index("chat_id", unique=True)
     await chats.create_index("subscribed")
+
+    allowed_users = get_allowed_users_collection()
+    await allowed_users.create_index("user_id", unique=True)
 
 
 async def add_app(link_or_package: str, trello_app_id: Optional[str] = None) -> Dict[str, Any]:
@@ -299,6 +310,34 @@ async def get_all_chats() -> List[int]:
     chats = get_chats_collection()
     cursor = chats.find({}, projection={"_id": 0, "chat_id": 1})
     return [doc["chat_id"] async for doc in cursor]
+
+
+async def is_user_allowed_in_db(user_id: int) -> bool:
+    coll = get_allowed_users_collection()
+    return await coll.find_one({"user_id": user_id}, {"_id": 1}) is not None
+
+
+async def add_allowed_user(user_id: int, added_by: int) -> bool:
+    """Returns True if newly added, False if already existed."""
+    coll = get_allowed_users_collection()
+    try:
+        await coll.insert_one({"user_id": user_id, "added_by": added_by, "added_at": _utcnow()})
+        return True
+    except DuplicateKeyError:
+        return False
+
+
+async def remove_allowed_user(user_id: int) -> bool:
+    """Returns True if removed, False if not found."""
+    coll = get_allowed_users_collection()
+    res = await coll.delete_one({"user_id": user_id})
+    return res.deleted_count > 0
+
+
+async def get_allowed_users() -> List[Dict[str, Any]]:
+    coll = get_allowed_users_collection()
+    cursor = coll.find({}, sort=[("added_at", 1)])
+    return [doc async for doc in cursor]
 
 
 async def get_app_by_package(package: str) -> Optional[Dict[str, Any]]:

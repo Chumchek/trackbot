@@ -18,11 +18,14 @@ from telegram.ext import (
     Application,
     ApplicationBuilder,
     CommandHandler,
+    ConversationHandler,
     ContextTypes,
     MessageHandler,
     CallbackQueryHandler,
+    TypeHandler,
     filters,
 )
+from telegram.ext import ApplicationHandlerStop
 
 import config
 import db
@@ -55,6 +58,27 @@ def get_trello_api() -> TrelloAPI | None:
     )
     logger.info("Trello: клієнт ініціалізовано")
     return _trello_api
+
+
+async def check_access(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not config.ALLOWED_USER_IDS:
+        return
+    user = update.effective_user
+    if user is None:
+        raise ApplicationHandlerStop
+    if user.id in config.ALLOWED_USER_IDS:
+        return
+    if await db.is_user_allowed_in_db(user.id):
+        return
+    if update.message:
+        await update.message.reply_text("⛔ Access denied.")
+    elif update.callback_query:
+        await update.callback_query.answer("⛔ Access denied.", show_alert=True)
+    raise ApplicationHandlerStop
+
+
+def _is_env_admin(user_id: int) -> bool:
+    return user_id in config.ALLOWED_USER_IDS
 
 
 BUTTON_CHECK_NOW = "Проверить приложения"
@@ -878,6 +902,93 @@ async def cmd_fix_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"Ошибка исправления: {e}")
 
 
+_AWAITING_ADD_USER_ID = 1
+
+
+def _admin_main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add User", callback_data="admin_add")],
+        [InlineKeyboardButton("👥 Manage Users", callback_data="admin_users")],
+        [InlineKeyboardButton("✖️ Close", callback_data="admin_close")],
+    ])
+
+
+async def _render_users_panel(message, edit: bool) -> None:
+    users = await db.get_allowed_users()
+    text = f"👥 Allowed Users ({len(users)}):" if users else "👥 No users added yet."
+    buttons = [
+        [InlineKeyboardButton(f"❌ {u['user_id']}", callback_data=f"admin_remove:{u['user_id']}")]
+        for u in users
+    ]
+    buttons.append([InlineKeyboardButton("➕ Add User", callback_data="admin_add")])
+    buttons.append([InlineKeyboardButton("🔙 Back", callback_data="admin_back")])
+    markup = InlineKeyboardMarkup(buttons)
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.reply_text(text, reply_markup=markup)
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_env_admin(update.effective_user.id):
+        return
+    await update.message.reply_text("🔐 Admin Panel", reply_markup=_admin_main_keyboard())
+
+
+async def on_admin_nav(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_env_admin(query.from_user.id):
+        await query.answer("⛔ Access denied.", show_alert=True)
+        return
+    await query.answer()
+    data = query.data
+
+    if data == "admin_close":
+        await query.message.delete()
+    elif data == "admin_back":
+        await query.message.edit_text("🔐 Admin Panel", reply_markup=_admin_main_keyboard())
+    elif data == "admin_users":
+        await _render_users_panel(query.message, edit=True)
+    elif data.startswith("admin_remove:"):
+        user_id = int(data.split(":")[1])
+        removed = await db.remove_allowed_user(user_id)
+        await query.answer(f"✅ Removed {user_id}" if removed else "User not found.", show_alert=False)
+        await _render_users_panel(query.message, edit=True)
+
+
+async def on_admin_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not _is_env_admin(query.from_user.id):
+        await query.answer("⛔ Access denied.", show_alert=True)
+        return ConversationHandler.END
+    await query.answer()
+    await query.message.edit_text(
+        "➕ Send me the Telegram user ID to add.\n\n"
+        "You can get it by forwarding their message to @userinfobot\n\n"
+        "Send /cancel to cancel."
+    )
+    return _AWAITING_ADD_USER_ID
+
+
+async def on_receive_user_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    if not text.lstrip("-").isdigit():
+        await update.message.reply_text("❌ Invalid ID. Send a numeric Telegram user ID or /cancel.")
+        return _AWAITING_ADD_USER_ID
+    user_id = int(text)
+    added = await db.add_allowed_user(user_id, added_by=update.effective_user.id)
+    if added:
+        await update.message.reply_text(f"✅ User {user_id} added. Use /admin to manage users.")
+    else:
+        await update.message.reply_text(f"⚠️ User {user_id} is already in the allowed list.")
+    return ConversationHandler.END
+
+
+async def on_cancel_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+
 async def post_init(app: Application) -> None:
     await db.init_db()
     await app.bot.set_my_commands(
@@ -910,6 +1021,8 @@ def main() -> None:
         .build()
     )
 
+    application.add_handler(TypeHandler(Update, check_access), group=-1)
+
     application.add_handler(CommandHandler("start", cmd_start))
     application.add_handler(CommandHandler("help", cmd_help))
     application.add_handler(CommandHandler("add", cmd_add))
@@ -921,8 +1034,21 @@ def main() -> None:
     application.add_handler(CommandHandler("debug", cmd_debug))
     application.add_handler(CommandHandler("test_app", cmd_test_app))
     application.add_handler(CommandHandler("fix_app", cmd_fix_app))
+    application.add_handler(CommandHandler("admin", cmd_admin))
+
+    application.add_handler(ConversationHandler(
+        entry_points=[CallbackQueryHandler(on_admin_add, pattern="^admin_add$")],
+        states={
+            _AWAITING_ADD_USER_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, on_receive_user_id),
+                CommandHandler("cancel", on_cancel_add),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", on_cancel_add)],
+    ))
 
     application.add_handler(CallbackQueryHandler(on_list_nav, pattern=r"^(list:|noop)"))
+    application.add_handler(CallbackQueryHandler(on_admin_nav, pattern=r"^admin_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     application.run_polling(close_loop=False)
