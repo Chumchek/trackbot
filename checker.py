@@ -454,6 +454,18 @@ async def fetch_app_metadata(link: str) -> Tuple[bool, Dict[str, str | List[str]
                     logger.info("[check] result unavailable not_found_indicator total %.3fs", time.perf_counter() - t_all)
                 return False, {}
 
+        # Google Play occasionally returns HTTP 200 with a server error page.
+        # Treat as a temporary glitch: app stays available, skip metadata update.
+        server_error_indicators = [
+            "error 500 (server error)",
+            "error 500",
+            "<title>error",
+        ]
+        for indicator in server_error_indicators:
+            if indicator in text_lower:
+                logger.warning("Temporary server error page for %s, skipping metadata update", link)
+                return True, {}
+
         meta = _parse_metadata_from_html(text)
 
         try:
