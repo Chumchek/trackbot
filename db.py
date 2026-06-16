@@ -228,6 +228,32 @@ async def remove_app(link_or_package: str) -> bool:
     return res.deleted_count > 0
 
 
+async def get_cleanup_candidates(days: int = 7) -> List[Dict[str, Any]]:
+    """Apps banned or stuck in moderation for more than `days` days."""
+    apps = get_apps_collection()
+    cutoff = _utcnow() - timedelta(days=days)
+    query = {
+        "$or": [
+            {"status": "unavailable", "banned_at": {"$lte": cutoff}},
+            {"first_time_added": True, "created_at": {"$lte": cutoff}},
+        ]
+    }
+    cursor = apps.find(query, sort=[("banned_at", 1), ("created_at", 1)])
+    return [doc async for doc in cursor]
+
+
+async def remove_app_by_package(package: str) -> bool:
+    apps = get_apps_collection()
+    res = await apps.delete_one({"package": package})
+    return res.deleted_count > 0
+
+
+async def remove_apps_by_packages(packages: List[str]) -> int:
+    apps = get_apps_collection()
+    res = await apps.delete_many({"package": {"$in": packages}})
+    return res.deleted_count
+
+
 async def list_apps(limit: int = 100) -> List[Dict[str, Any]]:
     apps = get_apps_collection()
     cursor = apps.find({}, sort=[("created_at", -1)], limit=limit)

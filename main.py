@@ -903,6 +903,73 @@ async def cmd_fix_app(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 _AWAITING_ADD_USER_ID = 1
+CLEANUP_DAYS = 7
+
+
+async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _register_chat_from_update(update)
+    if not _is_env_admin(update.effective_user.id):
+        return
+    candidates = await db.get_cleanup_candidates(CLEANUP_DAYS)
+    if not candidates:
+        await update.message.reply_text(f"✅ No apps inactive for {CLEANUP_DAYS}+ days.")
+        return
+    # Store packages in context so "Delete All" doesn't hit callback_data size limit
+    context.user_data["cleanup_packages"] = [d["package"] for d in candidates]
+    text, markup = _build_cleanup_panel(candidates)
+    await update.message.reply_text(text, reply_markup=markup)
+
+
+def _build_cleanup_panel(candidates: list) -> tuple:
+    lines = []
+    buttons = []
+    for doc in candidates:
+        pkg = doc.get("package", "")
+        name = doc.get("name") or pkg
+        if doc.get("first_time_added") and doc.get("status") != "unavailable":
+            reason = f"moderation {CLEANUP_DAYS}+ days"
+        else:
+            banned_at = doc.get("banned_at")
+            reason = f"banned {(datetime.now(timezone.utc) - banned_at).days}d ago" if banned_at else f"inactive {CLEANUP_DAYS}+ days"
+        lines.append(f"• {name}\n  {pkg} ({reason})")
+        buttons.append([InlineKeyboardButton(f"❌ {pkg}", callback_data=f"cleanup_one:{pkg}")])
+    buttons.append([InlineKeyboardButton(f"🗑 Delete All ({len(candidates)})", callback_data="cleanup_all")])
+    buttons.append([InlineKeyboardButton("✖️ Cancel", callback_data="cleanup_cancel")])
+    text = f"🧹 Apps inactive for {CLEANUP_DAYS}+ days ({len(candidates)}):\n\n" + "\n\n".join(lines)
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def on_cleanup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not _is_env_admin(query.from_user.id):
+        await query.answer("⛔ Access denied.", show_alert=True)
+        return
+    await query.answer()
+    data = query.data
+
+    if data == "cleanup_cancel":
+        await query.message.edit_text("Cancelled.")
+        return
+
+    if data.startswith("cleanup_one:"):
+        pkg = data.split(":", 1)[1]
+        await db.remove_app_by_package(pkg)
+        candidates = await db.get_cleanup_candidates(CLEANUP_DAYS)
+        context.user_data["cleanup_packages"] = [d["package"] for d in candidates]
+        if not candidates:
+            await query.message.edit_text("✅ Done — no more inactive apps.")
+        else:
+            text, markup = _build_cleanup_panel(candidates)
+            await query.message.edit_text(text, reply_markup=markup)
+        return
+
+    if data == "cleanup_all":
+        packages = context.user_data.pop("cleanup_packages", [])
+        if not packages:
+            await query.message.edit_text("⚠️ Nothing to delete, run /cleanup again.")
+            return
+        count = await db.remove_apps_by_packages(packages)
+        await query.message.edit_text(f"✅ Deleted {count} apps.")
 
 
 def _admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -1035,6 +1102,8 @@ def main() -> None:
     application.add_handler(CommandHandler("test_app", cmd_test_app))
     application.add_handler(CommandHandler("fix_app", cmd_fix_app))
     application.add_handler(CommandHandler("admin", cmd_admin))
+    application.add_handler(CommandHandler("cleanup", cmd_cleanup))
+    application.add_handler(CallbackQueryHandler(on_cleanup_callback, pattern=r"^cleanup_"))
 
     application.add_handler(ConversationHandler(
         entry_points=[CallbackQueryHandler(on_admin_add, pattern="^admin_add$")],
