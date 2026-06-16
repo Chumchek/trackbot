@@ -930,7 +930,12 @@ def _build_cleanup_panel(candidates: list) -> tuple:
             reason = f"moderation {CLEANUP_DAYS}+ days"
         else:
             banned_at = doc.get("banned_at")
-            reason = f"banned {(datetime.now(timezone.utc) - banned_at).days}d ago" if banned_at else f"inactive {CLEANUP_DAYS}+ days"
+            if banned_at:
+                if banned_at.tzinfo is None:
+                    banned_at = banned_at.replace(tzinfo=timezone.utc)
+                reason = f"banned {(datetime.now(timezone.utc) - banned_at).days}d ago"
+            else:
+                reason = f"inactive {CLEANUP_DAYS}+ days"
         lines.append(f"• {name}\n  {pkg} ({reason})")
         buttons.append([InlineKeyboardButton(f"❌ {pkg}", callback_data=f"cleanup_one:{pkg}")])
     buttons.append([InlineKeyboardButton(f"🗑 Delete All ({len(candidates)})", callback_data="cleanup_all")])
@@ -1070,6 +1075,7 @@ async def post_init(app: Application) -> None:
             ("check", "Проверить все приложения"),
             ("test_app", "Тест приложения"),
             ("fix_app", "Исправить приложение"),
+            ("cleanup", "Удалить неактивные приложения"),
         ]
     )
     app.job_queue.run_repeating(
