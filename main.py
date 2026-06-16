@@ -906,9 +906,14 @@ _AWAITING_ADD_USER_ID = 1
 CLEANUP_DAYS = 7
 
 
+async def _is_admin(user_id: int) -> bool:
+    return _is_env_admin(user_id) or await db.is_user_allowed_in_db(user_id)
+
+
 async def cmd_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _register_chat_from_update(update)
-    if not _is_env_admin(update.effective_user.id):
+    if not await _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Access denied.")
         return
     candidates = await db.get_cleanup_candidates(CLEANUP_DAYS)
     if not candidates:
@@ -946,7 +951,7 @@ def _build_cleanup_panel(candidates: list) -> tuple:
 
 async def on_cleanup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    if not _is_env_admin(query.from_user.id):
+    if not await _is_admin(query.from_user.id):
         await query.answer("⛔ Access denied.", show_alert=True)
         return
     await query.answer()
